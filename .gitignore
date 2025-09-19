@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 
 dataset/
+ambient-cg-images/
 
 # C extensions
 *.so
