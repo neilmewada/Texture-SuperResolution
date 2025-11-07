@@ -1,93 +1,146 @@
+# Credit: https://github.com/Nhat-Thanh/FSRCNN-Pytorch
+
+import os
+from neuralnet import FSRCNN_model 
+from utils.common import exists, tensor2numpy
 import torch
-import torch.nn as nn
-import math
+import numpy as np
 
-# Credit:
-# https://github.com/yjn870/SRCNN-pytorch
+class logger:
+    def __init__(self, path, values) -> None:
+        self.path = path
+        self.values = values
 
-class SRCNN(nn.Module):
-    def __init__(self, num_channels=1):
-        super(SRCNN, self).__init__()
-        self.conv1 = nn.Conv2d(num_channels, 64, kernel_size=9, padding=9 // 2)
-        self.conv2 = nn.Conv2d(64, 32, kernel_size=5, padding=5 // 2)
-        self.conv3 = nn.Conv2d(32, num_channels, kernel_size=5, padding=5 // 2)
-        self.relu = nn.ReLU(inplace=True)
+class FSRCNN:
+    def __init__(self, scale, device):
+        self.device = device
+        self.model = FSRCNN_model(scale).to(device)
+        self.optimizer = None
+        self.loss =  None
+        self.metric = None
+        self.model_path = None
+        self.ckpt_path = None
+        self.ckpt_man = None
 
-    def forward(self, x):
-        x = self.relu(self.conv1(x))
-        x = self.relu(self.conv2(x))
-        x = self.conv3(x)
-        return x
+    def setup(self, optimizer, loss, metric, model_path, ckpt_path):
+        self.optimizer = optimizer
+        self.loss = loss
+        self.metric = metric
+        # @the best model weights
+        self.model_path = model_path
+        self.ckpt_path = ckpt_path
 
-class FSRCNN_model(nn.Module):
-    def __init__(self, scale: int) -> None:
-        super(FSRCNN_model, self).__init__()
+    def load_checkpoint(self, ckpt_path):
+        if not exists(ckpt_path):
+            return
+        self.ckpt_man = torch.load(ckpt_path)
+        self.optimizer.load_state_dict(self.ckpt_man['optimizer'])
+        self.model.load_state_dict(self.ckpt_man['model'])
 
-        if scale not in [2, 3, 4]:
-            raise ValueError("must be 2, 3 or 4")
+    def load_weights(self, filepath):
+        self.model.load_state_dict(torch.load(filepath, map_location=torch.device(self.device)))
 
-        d = 56
-        s = 12
+    def predict(self, lr):
+        self.model.train(False)
+        sr = self.model(lr)
+        return sr
 
-        self.feature_extract = nn.Conv2d(in_channels=3, out_channels=d, kernel_size=5, padding=2)
-        nn.init.kaiming_normal_(self.feature_extract.weight)
-        nn.init.zeros_(self.feature_extract.bias)
+    def evaluate(self, dataset, batch_size=64):
+        losses, metrics = [], []
+        isEnd = False
+        while isEnd == False:
+            lr, hr, isEnd = dataset.get_batch(batch_size, shuffle_each_epoch=False)
+            lr, hr = lr.to(self.device), hr.to(self.device)
+            sr = self.predict(lr)
+            loss = self.loss(hr, sr)
+            metric = self.metric(hr, sr)
+            losses.append(tensor2numpy(loss))
+            metrics.append(tensor2numpy(metric))
 
-        self.activation_1 = nn.PReLU(num_parameters=d)
+        metric = np.mean(metrics)
+        loss = np.mean(losses)
+        return loss, metric
 
-        self.shrink = nn.Conv2d(in_channels=d, out_channels=s, kernel_size=1)
-        nn.init.kaiming_normal_(self.shrink.weight)
-        nn.init.zeros_(self.shrink.bias)
+    def train(self, train_set, valid_set, batch_size, steps, save_every=1,
+              save_best_only=False, save_log=False, log_dir=None):
 
-        self.activation_2 = nn.PReLU(num_parameters=s)
+        if (save_log) and (log_dir is None):
+            raise ValueError("log_dir must be specified if save_log is True")
+        os.makedirs(log_dir, exist_ok=True)
+        dict_logger = {"loss":       logger(path=os.path.join(log_dir, "losses.npy"),      values=[]),
+                       "metric":     logger(path=os.path.join(log_dir, "metrics.npy"),     values=[]),
+                       "val_loss":   logger(path=os.path.join(log_dir, "val_losses.npy"),  values=[]),
+                       "val_metric": logger(path=os.path.join(log_dir, "val_metrics.npy"), values=[])}
+        for key in dict_logger.keys():
+            path = dict_logger[key].path
+            if exists(path):
+                dict_logger[key].values = np.load(path).tolist()
+
+        cur_step = 0
+        if self.ckpt_man is not None:
+            cur_step = self.ckpt_man['step']
+        max_steps = cur_step + steps
+
+        prev_loss = np.inf
+        if save_best_only and exists(self.model_path):
+            self.load_weights(self.model_path)
+            prev_loss, _ = self.evaluate(valid_set)
+            self.load_checkpoint(self.ckpt_path)
+
+        loss_buffer = []
+        metric_buffer = []
+        while cur_step < max_steps:
+            cur_step += 1
+            lr, hr, _ = train_set.get_batch(batch_size)
+            loss, metric = self.train_step(lr, hr)
+            loss_buffer.append(tensor2numpy(loss))
+            metric_buffer.append(tensor2numpy(metric))
+
+            if (cur_step % save_every == 0) or (cur_step >= max_steps):
+                loss = np.mean(loss_buffer)
+                metric = np.mean(metric_buffer)
+                val_loss, val_metric = self.evaluate(valid_set)
+                print(f"Step {cur_step}/{max_steps}",
+                      f"- loss: {loss:.7f}",
+                      f"- {self.metric.__name__}: {metric:.3f}",
+                      f"- val_loss: {val_loss:.7f}",
+                      f"- val_{self.metric.__name__}: {val_metric:.3f}")
+                if save_log == True:
+                    dict_logger["loss"].values.append(loss)
+                    dict_logger["metric"].values.append(metric)
+                    dict_logger["val_loss"].values.append(val_loss)
+                    dict_logger["val_metric"].values.append(val_metric)
+                
+                loss_buffer = []
+                metric_buffer = []
+                torch.save({'step': cur_step,
+                            'model': self.model.state_dict(),
+                            'optimizer': self.optimizer.state_dict()
+                            }, self.ckpt_path)
+
+                if save_best_only and val_loss > prev_loss:
+                    continue
+                prev_loss = val_loss
+                torch.save(self.model.state_dict(), self.model_path)
+                print(f"Save model to {self.model_path}\n")
         
-        # m = 4
-        self.map_1 = nn.Conv2d(in_channels=s, out_channels=s, kernel_size=3, padding=1)
-        nn.init.kaiming_normal_(self.map_1.weight)
-        nn.init.zeros_(self.map_1.bias)
+        if save_log == True:
+            for key in dict_logger.keys():
+                logger_obj = dict_logger[key]
+                path = logger_obj.path
+                values = np.array(logger_obj.values, dtype=np.float32)
+                np.save(path, values)
+  
+    def train_step(self, lr, hr):
+        self.model.train(True)
+        self.optimizer.zero_grad()
 
-        self.map_2 = nn.Conv2d(in_channels=s, out_channels=s, kernel_size=3, padding=1)
-        nn.init.kaiming_normal_(self.map_2.weight)
-        nn.init.zeros_(self.map_2.bias)
+        lr, hr = lr.to(self.device), hr.to(self.device)
+        sr = self.model(lr)
 
-        self.map_3 = nn.Conv2d(in_channels=s, out_channels=s, kernel_size=3, padding=1)
-        nn.init.kaiming_normal_(self.map_3.weight)
-        nn.init.zeros_(self.map_3.bias)
+        loss = self.loss(hr, sr)
+        metric = self.metric(hr, sr)
+        loss.backward()
+        self.optimizer.step()
 
-        self.map_4 = nn.Conv2d(in_channels=s, out_channels=s, kernel_size=3, padding=1)
-        nn.init.kaiming_normal_(self.map_4.weight)
-        nn.init.zeros_(self.map_4.bias)
-
-        self.activation_3 = nn.PReLU(num_parameters=s)
-
-        self.expand = nn.Conv2d(in_channels=s, out_channels=d, kernel_size=1)
-        nn.init.kaiming_normal_(self.expand.weight)
-        nn.init.zeros_(self.expand.bias)
-
-        self.activation_4 = nn.PReLU(num_parameters=d)
-
-        self.deconv = nn.ConvTranspose2d(in_channels=d, out_channels=3, kernel_size=9, 
-                                        stride=scale, padding=4, output_padding=scale-1)
-        nn.init.normal_(self.deconv.weight, mean=0.0, std=0.001)
-        nn.init.zeros_(self.deconv.bias)
-
-    def forward(self, X_in):
-        X = self.feature_extract(X_in)
-        X = self.activation_1(X)
-
-        X = self.shrink(X)
-        X = self.activation_2(X)
-
-        X = self.map_1(X)
-        X = self.map_2(X)
-        X = self.map_3(X)
-        X = self.map_4(X)
-        X = self.activation_3(X)
-
-        X = self.expand(X)
-        X = self.activation_4(X)
-
-        X = self.deconv(X)
-        X_out = torch.clip(X, 0.0, 1.0)
-
-        return X_out
+        return loss, metric
