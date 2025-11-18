@@ -7,6 +7,7 @@ import math
 import warnings
 import torch, torch.nn.functional as F
 import lpips
+import torchmetrics
 
 def rgb_to_y(t: torch.Tensor) -> torch.Tensor:
     # [B,3,H,W] -> [B,1,H,W] in [0,1]
@@ -183,6 +184,16 @@ def LPIPS(img1, img2): # Learned Perceptual Image Patch Similarity
 
     distance_tensor = loss_fn_alex(img1, img2)
     return distance_tensor.mean().item()
+
+def MS_SSIM(img1, img2): # Multi-Scale SSIM
+    ms_ssim_metric = torchmetrics.image.MultiScaleStructuralSimilarityIndexMeasure(data_range=1.0, kernel_size=11, reduction='elementwise_mean')
+    if img1.dim() == 3:
+        img1 = img1.unsqueeze(0)  # Add batch dimension
+        img2 = img2.unsqueeze(0)
+    
+    assert img1.shape == img2.shape and img1.min().item() >= -0 and img1.max().item() <= 1 and img1.dim() == 4 and img1.size(1) == 3
+    ms_ssim_score = ms_ssim_metric(img1, img2).item()
+    return ms_ssim_score
 
 def random_crop(src, h, w):
     crop = transforms.RandomCrop([h, w])(src)
