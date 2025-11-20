@@ -4,7 +4,10 @@ import torchvision.transforms as transforms
 import numpy as np
 import os
 import math
+import warnings
 import torch, torch.nn.functional as F
+import lpips
+import torchmetrics
 
 def rgb_to_y(t: torch.Tensor) -> torch.Tensor:
     # [B,3,H,W] -> [B,1,H,W] in [0,1]
@@ -21,12 +24,17 @@ def _gaussian_window(window_size=11, sigma=1.5, channels=1, device="cpu", dtype=
     return window
 
 @torch.no_grad()
-def ssim_y(img1: torch.Tensor, img2: torch.Tensor, data_range=1.0, window_size=11, sigma=1.5, shave=0, reduction="mean"):
+def SSIM_Y(img1: torch.Tensor, img2: torch.Tensor, data_range=1.0, window_size=11, sigma=1.5, shave=0, reduction="mean"):
     """
     SSIM on Y channel. img1,img2: [B,3,H,W] in [0,1].
     """
     print(img1.shape, " ", img2.shape, " ", img1.dim(), " ", img1.size(1))
-    assert img1.shape == img2.shape and img1.dim() == 3 and img1.size(1) == 3
+
+    if img1.dim() == 3:
+        img1 = img1.unsqueeze(0)  # Add batch dimension
+        img2 = img2.unsqueeze(0)
+    
+    assert img1.shape == img2.shape and img1.dim() == 4 and img1.size(1) == 3
     y1 = rgb_to_y(img1)
     y2 = rgb_to_y(img2)
 
@@ -155,11 +163,37 @@ def denorm01(src):
 def exists(path):
     return os.path.exists(path)
 
-def PSNR(y_true, y_pred, max_val=1.0):
+def MSE(y_true, y_pred):
     y_true = y_true.type(torch.float32)
     y_pred = y_pred.type(torch.float32)
-    MSE = torch.mean(torch.square(y_true - y_pred))
-    return 10 * torch.log10(max_val * max_val / MSE)
+    return torch.mean(torch.square(y_true - y_pred))
+
+def PSNR(y_true, y_pred, max_val=1.0):
+    return 10 * torch.log10(max_val * max_val / MSE(y_true, y_pred))
+
+def LPIPS(img1, img2): # Learned Perceptual Image Patch Similarity
+    warnings.filterwarnings("ignore", category=UserWarning, module="torchvision.models._utils") # suppress torchvision UserWarning
+    loss_fn_alex = lpips.LPIPS(net='alex')
+
+    if img1.min().item() >= 0:
+        img1 = img1 * 2 - 1  # change [0,1] -> [-1,1]
+    if img2.min().item() >= 0:
+        img2 = img2 * 2 - 1
+
+    assert img1.shape == img2.shape and img1.min().item() >= -1 and img1.max().item() <= 1
+
+    distance_tensor = loss_fn_alex(img1, img2)
+    return distance_tensor.mean().item()
+
+def MS_SSIM(img1, img2): # Multi-Scale SSIM
+    ms_ssim_metric = torchmetrics.image.MultiScaleStructuralSimilarityIndexMeasure(data_range=1.0, kernel_size=11, reduction='elementwise_mean')
+    if img1.dim() == 3:
+        img1 = img1.unsqueeze(0)  # Add batch dimension
+        img2 = img2.unsqueeze(0)
+    
+    assert img1.shape == img2.shape and img1.min().item() >= -0 and img1.max().item() <= 1 and img1.dim() == 4 and img1.size(1) == 3
+    ms_ssim_score = ms_ssim_metric(img1, img2).item()
+    return ms_ssim_score
 
 def random_crop(src, h, w):
     crop = transforms.RandomCrop([h, w])(src)
