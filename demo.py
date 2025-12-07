@@ -8,9 +8,6 @@ parser.add_argument("--ckpt-path",  type=str, default="",                  help=
 parser.add_argument("--image-path", type=str, default="dataset/test1.jpg", help='-')
 
 
-# -----------------------------------------------------------
-# global variables
-# -----------------------------------------------------------
 
 FLAGS, unparsed = parser.parse_known_args()
 image_path = FLAGS.image_path
@@ -25,13 +22,8 @@ if (ckpt_path == "") or (ckpt_path == "default"):
 
 sigma = 0.3 if scale == 2 else 0.2
 
-
-# -----------------------------------------------------------
-# demo
-# -----------------------------------------------------------
-
 def main():
-    device = "cuda"# if torch.cuda.is_available() else "cpu"
+    device = "cuda" # Change this to cpu or mps if cuda is not available
 
     lr_image = read_image(image_path)
     bicubic_image = upscale(lr_image, scale)

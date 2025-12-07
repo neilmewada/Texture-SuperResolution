@@ -1,3 +1,5 @@
+# Credit: https://github.com/Nhat-Thanh/FSRCNN-Pytorch
+
 import torch
 import torch.nn as nn
 
